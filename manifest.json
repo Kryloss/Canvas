@@ -3,8 +3,8 @@
   "short_name": "GymCanvas",
   "start_url": ".",
   "display": "standalone",
-  "background_color": "#0f0f13",
-  "theme_color": "#141419",
+  "background_color": "#0b0b0d",
+  "theme_color": "#0b0b0d",
   "icons": [
     {
       "src": "icon-192.png",

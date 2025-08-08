@@ -3,16 +3,15 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <meta name="theme-color" content="#141419"/>
+  <meta name="theme-color" content="#0b0b0d"/>
   <title>GymCanvas</title>
   <link rel="manifest" href="manifest.json">
   <link rel="apple-touch-icon" href="icon-512.png">
   <style>
-    html,body { margin:0; padding:0; height:100%; background:#0f0f13; overscroll-behavior:none; }
-    #c { position:fixed; inset:0; display:block; touch-action:none; }
-    /* invisible inputs over canvas for file/keyboard when needed */
+    html,body { margin:0; padding:0; height:100%; background:#0b0b0d; overscroll-behavior:none; -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale; }
+    #c { position:fixed; inset:0; display:block; }
     #file { position:fixed; left:-9999px; top:-9999px; }
-    #installHint { position: fixed; top: env(safe-area-inset-top, 12px); right: 12px; background:rgba(255,255,255,0.1); color:#fff; padding:8px 10px; border-radius:10px; font: 12px ui-rounded, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; display:none; }
+    #installHint { position: fixed; top: env(safe-area-inset-top, 12px); right: 12px; background:rgba(255,255,255,0.12); color:#fff; padding:8px 10px; border-radius:10px; font: 12px ui-rounded, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; display:none; }
   </style>
 </head>
 <body>
