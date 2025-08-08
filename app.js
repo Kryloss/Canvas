@@ -1,538 +1,621 @@
-/* GymCanvas v2 - crisp canvas UI + better UX + personalization */
-(function(){
-  const c = document.getElementById('c');
-  const ctx = c.getContext('2d');
-  const file = document.getElementById('file');
-  const installHint = document.getElementById('installHint');
-  const DPR = Math.max(1, Math.min(3, window.devicePixelRatio||1));
-  let W=0, H=0; // logical CSS pixels
-  let safeT=12, safeB=16; // logical
-  const FONT_UI = 'ui-rounded,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif';
-
-  // THEMING
-  const defaultTheme = {
-    scheme: 'dark', // 'dark' | 'amoled' | 'light'
-    accent: '#4C6EF5',
-    fontScale: 1.0
+(() => {
+  // =============== Utilities ===============
+  const DPR = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+  const SAFE = {top: 0, bottom: 0}; // updated after resize with env(safe-area-inset-*) via CSS not available in JS directly
+  const THEME = {
+    bg: "#0f1115",
+    card: "#161a22",
+    card2: "#1b2130",
+    accent: "#7c5cff",
+    accent2: "#4fd1c5",
+    text: "#e6e6e9",
+    sub: "#9aa2b1",
+    good: "#4ade80",
+    warn: "#fbbf24",
+    bad: "#ef4444",
+    border: "#2a3142",
   };
 
-  let state = load() || bootstrap();
-  let tab = state.ui.tab || 'weeks'; // weeks | planning | nutrition | settings
-  let activeWeekId = state.ui.activeWeekId || state.weeks[0].id;
-  let scroll = 0;
-  let hits = [];
-  let pressStart = 0;
-  let dragging = null;
+  const clamp = (v, a, b)=> Math.max(a, Math.min(b, v));
+  const L = (k, v) => v===undefined ? JSON.parse(localStorage.getItem(k) || "null") : localStorage.setItem(k, JSON.stringify(v));
+  const uid = ()=> Math.random().toString(36).slice(2, 9);
+  const todayKey = ()=> new Date().toISOString().slice(0,10);
 
-  // PWA
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js');
-  if (!window.matchMedia('(display-mode: standalone)').matches) {
-    installHint.style.display='block'; setTimeout(()=>installHint.style.display='none', 4000);
+  function loadState(){
+    let s = L("gp_canvas_state");
+    if(!s){
+      s = {
+        weeks: [makeWeek("Week 1")],
+        activeWeekIndex: 0,
+        tab: "weeks", // "weeks" | "planning" | "nutrition"
+        presets: [],
+        activePresetId: null,
+        nutrition: { // per date
+          [todayKey()]: {cal:0, p:0, f:0, c:0, items:[]}
+        },
+      };
+      L("gp_canvas_state", s);
+    }
+    return s;
   }
+  function saveState(){ L("gp_canvas_state", state); }
 
-  // Resize & crisp text
-  function resize(){
-    const rect = c.getBoundingClientRect();
-    W = Math.floor(rect.width);
-    H = Math.floor(rect.height);
-    c.width = Math.floor(W * DPR);
-    c.height = Math.floor(H * DPR);
-    ctx.setTransform(DPR,0,0,DPR,0,0); // draw in logical units; crisp text
-    draw();
-  }
-  window.addEventListener('resize', resize);
-  resize();
-
-  // Base helpers
-  function save(){ state.ui={tab,activeWeekId,scroll}; localStorage.setItem('gymcanvas_v2', JSON.stringify(state)); }
-  function load(){ try{ return JSON.parse(localStorage.getItem('gymcanvas_v2')); }catch(e){ return null; } }
-  function bootstrap(){
-    const weekId = id();
+  function makeWeek(name){
     return {
-      theme: defaultTheme,
-      weeks: [ {id:weekId, name:'Week 1', workouts:[]} ],
-      presets: [ {id:id(), name:'3x Split', days:[1,3,5], workouts:[{name:'Push'},{name:'Pull'},{name:'Legs'}]} ],
-      nutrition: { todayDate: todayStr(), today:{items:[],totals:{cal:0,p:0,f:0,c:0}}, history: [] },
-      images:{},
-      ui:{ tab:'weeks', activeWeekId: weekId, scroll:0 }
+      id: uid(),
+      name,
+      scroll: 0,
+      workouts: [ // each is a block (draggable)
+        {id: uid(), title: "Full Body A", done: false, exercises: [
+          ex("Push-ups", 3, 12),
+          ex("Squats", 3, 15),
+          ex("Rows (Dumbbell)", 3, 10)
+        ]}
+      ]
     };
   }
-  function id(){ return Math.random().toString(36).slice(2,10); }
-  function todayStr(){ return new Date().toISOString().slice(0,10); }
-  function clamp(v,a,b){ return Math.max(a,Math.min(b,v)); }
-
-  // Input + hit testing
-  c.addEventListener('pointerdown', (e)=>{
-    c.setPointerCapture(e.pointerId);
-    pressStart = performance.now();
-    const p = getPoint(e);
-    const target = findHit(p.x,p.y);
-    if (target) target.onDown && target.onDown(p);
-    else dragging = {kind:'scroll', y:p.y, startScroll:scroll};
-  });
-  c.addEventListener('pointermove', (e)=>{
-    const p = getPoint(e);
-    if (dragging){
-      if (dragging.kind==='scroll'){
-        const dy = p.y - dragging.y;
-        scroll = clamp(dragging.startScroll - dy, 0, 100000);
-        draw();
-      } else if (dragging.kind==='reorder' && dragging.block){
-        dragging.block._y = p.y - dragging.offset; // temporary position
-        draw();
-      }
-    }
-  });
-  c.addEventListener('pointerup', (e)=>{
-    const p = getPoint(e);
-    const target = findHit(p.x,p.y);
-    if (dragging && dragging.kind==='reorder'){
-      // finalize order
-      const wk = currentWeek();
-      wk.workouts.sort((a,b)=> (a._y||0) - (b._y||0));
-      wk.workouts.forEach(w=> delete w._y);
-      save();
-      dragging = null; draw(); return;
-    }
-    dragging = null;
-    if (target && (!target.onDown || (performance.now()-pressStart)<300)){
-      target.onTap && target.onTap(p);
-    }
-  });
-  c.addEventListener('wheel', (e)=>{ scroll = clamp(scroll + e.deltaY, 0, 100000); draw(); }, {passive:true});
-
-  function getPoint(e){
-    const r = c.getBoundingClientRect();
-    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  function ex(name, sets=3, reps=10, weight="", notes="", img=""){
+    return {id: uid(), name, sets, reps, weight, notes, img};
   }
-  function addHit(x,y,w,h,handlers){ hits.push({x,y,w,h,...handlers}); }
-  function findHit(x,y){
-    for (let i=hits.length-1;i>=0;i--){
+
+  let state = loadState();
+
+  // =============== Canvas Boot ===============
+  const canvas = document.getElementById("app");
+  const ctx = canvas.getContext("2d");
+  const input = document.getElementById("ui-input");
+  const fileInput = document.getElementById("file-input");
+
+  let W=0, H=0;
+  function resize(){
+    const rect = canvas.getBoundingClientRect();
+    W = Math.round(rect.width * DPR);
+    H = Math.round(rect.height * DPR);
+    canvas.width = W;
+    canvas.height = H;
+    canvas.style.width = rect.width + "px";
+    canvas.style.height = rect.height + "px";
+    draw();
+  }
+  window.addEventListener("resize", resize, {passive:true});
+  resize();
+
+  // =============== Input System ===============
+  let touches = [];
+  let drag = null;
+  let tapStart = null;
+
+  canvas.addEventListener("touchstart", (e)=>{
+    e.preventDefault();
+    const t = e.changedTouches[0];
+    const p = {x: t.clientX * DPR, y: t.clientY * DPR, id: t.identifier};
+    touches.push(p);
+    tapStart = {...p, time: performance.now()};
+    onPointerDown(p.x, p.y);
+  }, {passive:false});
+  canvas.addEventListener("touchmove", (e)=>{
+    e.preventDefault();
+    const t = e.changedTouches[0];
+    const p = {x: t.clientX * DPR, y: t.clientY * DPR, id: t.identifier};
+    onPointerMove(p.x, p.y);
+  }, {passive:false});
+  canvas.addEventListener("touchend", (e)=>{
+    e.preventDefault();
+    const t = e.changedTouches[0];
+    const p = {x: t.clientX * DPR, y: t.clientY * DPR, id: t.identifier};
+    onPointerUp(p.x, p.y);
+  }, {passive:false});
+
+  // Mouse (for desktop testing)
+  canvas.addEventListener("mousedown", (e)=>{
+    const x = e.clientX * DPR, y = e.clientY * DPR;
+    onPointerDown(x,y);
+  });
+  window.addEventListener("mousemove", (e)=>{
+    const x = e.clientX * DPR, y = e.clientY * DPR;
+    onPointerMove(x,y);
+  });
+  window.addEventListener("mouseup", (e)=>{
+    const x = e.clientX * DPR, y = e.clientY * DPR;
+    onPointerUp(x,y);
+  });
+
+  // =============== UI Atoms ===============
+  function rrect(x,y,w,h,r){
+    ctx.beginPath();
+    const rr = Math.min(r, h/2, w/2);
+    ctx.moveTo(x+rr,y);
+    ctx.arcTo(x+w,y,x+w,y+h,rr);
+    ctx.arcTo(x+w,y+h,x,y+h,rr);
+    ctx.arcTo(x,y+h,x,y,rr);
+    ctx.arcTo(x,y,x+w,y,rr);
+    ctx.closePath();
+  }
+  function button(label, x,y,w,h, opts={}){
+    const {active=false, icon=null} = opts;
+    ctx.fillStyle = active? THEME.accent : THEME.card;
+    rrect(x,y,w,h, 18);
+    ctx.fill();
+    ctx.fillStyle = active? "#0b0d10" : THEME.text;
+    ctx.font = `${Math.floor(h*0.45)}px system-ui`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    if(icon){
+      ctx.fillText(icon + " " + label, x+w/2, y+h/2);
+    } else {
+      ctx.fillText(label, x+w/2, y+h/2);
+    }
+    return {x,y,w,h};
+  }
+  function chip(label, x,y,w,h, active=false){
+    ctx.fillStyle = active ? THEME.accent2 : THEME.card2;
+    rrect(x,y,w,h, 12); ctx.fill();
+    ctx.fillStyle = active ? "#0b0d10" : THEME.text;
+    ctx.font = `${Math.floor(h*0.45)}px system-ui`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(label, x+w/2, y+h/2);
+    return {x,y,w,h};
+  }
+  function checkbox(checked, x,y,size){
+    ctx.fillStyle = THEME.card2;
+    rrect(x,y,size,size, 8); ctx.fill();
+    if(checked){
+      ctx.fillStyle = THEME.good;
+      rrect(x+size*0.15,y+size*0.15,size*0.7,size*0.7,6); ctx.fill();
+    }
+    return {x,y,w:size,h:size};
+  }
+
+  // Hit regions store
+  let hits = [];
+  function hit(id, rect){ hits.push({id, ...rect}); }
+  function hitTest(x,y){
+    for (let i = hits.length - 1; i >= 0; i--){
       const h = hits[i];
-      if (x>=h.x && y>=h.y && x<=h.x+h.w && y<=h.y+h.h) return h;
+      if (x>=h.x && x<=h.x+h.w && y>=h.y && y<=h.y+h.h) return h.id;
     }
     return null;
   }
 
-  // Theme helpers
-  function colors(){
-    const t = state.theme||defaultTheme;
-    const base = t.scheme==='light' ? {bg:'#f6f7fb', panel:'#ffffff', text:'#0b0b0d'} :
-                t.scheme==='amoled' ? {bg:'#000000', panel:'rgba(255,255,255,0.06)', text:'#ffffff'} :
-                                       {bg:'#0b0b0d', panel:'rgba(255,255,255,0.06)', text:'#ffffff'};
-    return { ...base, accent:t.accent };
-  }
-  function font(px){ return `${Math.round(px*(state.theme?.fontScale||1))}px ${FONT_UI}`; }
-
-  // Common UI
-  function roundRect(x,y,w,h,r){
-    ctx.beginPath();
-    ctx.moveTo(x+r,y);
-    ctx.arcTo(x+w,y,x+w,y+h,r);
-    ctx.arcTo(x+w,y+h,x,y+h,r);
-    ctx.arcTo(x,y+h,x,y,r);
-    ctx.arcTo(x,y,x+w,y,r);
-    ctx.closePath();
-  }
-  function button(x,y,w,h,label,onTap,opts={}){
-    const col = colors();
-    ctx.save();
-    ctx.fillStyle = opts.ghost ? 'rgba(255,255,255,0.1)' : col.accent;
-    roundRect(x,y,w,h,10); ctx.fill();
-    ctx.fillStyle = '#fff';
-    ctx.font = font(14);
-    ctx.textBaseline='middle';
-    ctx.fillText(label, x+12, y+h/2+1);
-    addHit(x,y,w,h,{onTap});
-    ctx.restore();
-  }
-  function iconButton(x,y,size,label,onTap){
-    const col = colors();
-    ctx.save();
-    ctx.fillStyle = 'rgba(255,255,255,0.12)';
-    roundRect(x,y,size,size,10); ctx.fill();
-    ctx.fillStyle='#fff'; ctx.font = font(16);
-    ctx.textBaseline='middle';
-    ctx.fillText(label, x+size/2-5, y+size/2+1);
-    addHit(x,y,size,size,{onTap});
-    ctx.restore();
-  }
-  function textChip(x,y,label,active,onTap,onDelete){
-    ctx.save();
-    ctx.font = font(14);
-    const padX=12, h=32;
-    const w = ctx.measureText(label).width + padX*2 + (onDelete?18:0);
-    ctx.fillStyle = active ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.10)';
-    roundRect(x,y,w,h,12); ctx.fill();
-    ctx.fillStyle = '#fff';
-    ctx.textBaseline='middle';
-    ctx.fillText(label, x+padX, y+h/2+1);
-    addHit(x,y,w,h,{onTap});
-    if (onDelete){
-      ctx.globalAlpha=0.9;
-      ctx.fillText('×', x+w-16, y+h/2+1);
-      addHit(x+w-24, y+4, 20, 24, { onTap: onDelete });
-    }
-    ctx.restore();
-    return w;
-  }
-  function divider(y){ ctx.fillStyle='rgba(255,255,255,0.08)'; ctx.fillRect(16,y,W-32,1); }
-
-  // Data helpers
-  function currentWeek(){ return state.weeks.find(w=>w.id===activeWeekId) || state.weeks[0]; }
-  function ensureNutritionToday(){
-    const t = todayStr();
-    if (state.nutrition.todayDate!==t){
-      state.nutrition.history.push({date: state.nutrition.todayDate, ...state.nutrition.today});
-      state.nutrition.todayDate=t;
-      state.nutrition.today={items:[],totals:{cal:0,p:0,f:0,c:0}};
-      save();
-    }
-  }
-
-  // Draw
+  // =============== Render ===============
   function draw(){
-    hits.length=0;
-    const col = colors();
+    hits = [];
     ctx.clearRect(0,0,W,H);
-    ctx.fillStyle = col.bg; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = THEME.bg;
+    ctx.fillRect(0,0,W,H);
 
-    // TOP: week chips or title depending on tab
-    const topH = 64;
-    if (tab==='weeks'){
-      drawWeekChips(0,0,W,topH);
-    } else {
-      ctx.fillStyle='#fff'; ctx.font=font(20); ctx.textBaseline='middle';
-      ctx.fillText(cap(tab), 16, topH/2+2);
-      // Quick switch to settings
-      iconButton(W-48, 12, 36, '⚙', ()=>{ tab='settings'; save(); draw(); });
+    drawTopWeeks();
+    drawBottomNav();
+    const contentTop = Math.floor(100*DPR);
+    const contentBottom = Math.floor(90*DPR);
+    const contentH = H - contentTop - contentBottom;
+    const contentY = contentTop;
+
+    if(state.tab === "weeks"){
+      drawWeeks(contentY, contentH);
+    } else if(state.tab === "planning"){
+      drawPlanning(contentY, contentH);
+    } else if(state.tab === "nutrition"){
+      drawNutrition(contentY, contentH);
     }
-
-    // CONTENT
-    const bottomH = 72;
-    if (tab==='weeks') drawWeeks(topH, H-bottomH);
-    if (tab==='planning') drawPlanning(topH, H-bottomH);
-    if (tab==='nutrition') drawNutrition(topH, H-bottomH);
-    if (tab==='settings') drawSettings(topH, H-bottomH);
-
-    // BOTTOM TABS
-    drawTabs(H-bottomH, bottomH);
   }
 
-  function cap(s){ return s[0].toUpperCase()+s.slice(1); }
+  function drawTopWeeks(){
+    const h = Math.floor(88 * DPR);
+    const pad = Math.floor(14 * DPR);
+    // Title bar
+    ctx.fillStyle = THEME.bg;
+    ctx.fillRect(0,0,W,h);
 
-  function drawWeekChips(x,y,w,h){
-    // title row: week chips with + and delete on chip
-    let xx = 16;
-    const y0 = y + 16;
-    state.weeks.forEach((wk)=>{
-      const del = ()=>{
-        if (state.weeks.length===1) return alert('Keep at least one week.');
-        if (confirm('Delete this week?')){
-          state.weeks = state.weeks.filter(w=>w.id!==wk.id);
-          activeWeekId = state.weeks[0].id;
-          save(); draw();
-        }
-      };
-      const used = textChip(xx, y0, wk.name, wk.id===activeWeekId, ()=>{ activeWeekId=wk.id; save(); draw(); }, del);
-      xx += used + 8;
+    // Weeks chips + add
+    let x = pad, y = pad*1.2, ch = h - pad*2;
+    state.weeks.forEach((w,i)=>{
+      const cw = Math.min(Math.floor(240*DPR), Math.floor(W*0.35));
+      chip(w.name, x,y,cw,ch, i===state.activeWeekIndex);
+      hit(`week:${i}`, {x,y,w:cw,h:ch});
+      x += cw + pad;
     });
-    const addW = textChip(xx, y0, '+ Add week', false, ()=>{
-      const name = prompt('Week name:', 'Week '+(state.weeks.length+1)) || 'New Week';
-      const w = {id:id(), name, workouts:[]};
-      state.weeks.push(w); activeWeekId=w.id; save(); draw();
-    });
+    // add week
+    const addW = Math.floor(160*DPR);
+    button("+ Week", x, y, addW, ch);
+    hit("add-week", {x,y,w:addW,h:ch});
   }
 
-  function drawWeeks(top,bottomY){
-    const col = colors();
-    const wk = currentWeek();
-    let y = top + 8 - scroll;
+  function drawBottomNav(){
+    const h = Math.floor(82 * DPR);
+    const y = H - h;
+    ctx.fillStyle = THEME.bg;
+    ctx.fillRect(0, y, W, h);
 
-    if (!wk.workouts.length){
-      ctx.fillStyle='rgba(255,255,255,0.8)'; ctx.font=font(16);
-      ctx.fillText('No workouts yet. Tap + to add one.', 16, y+8);
+    const w = Math.floor(W/3);
+    const labels = [["Weeks","📅"],["Planning","🧩"],["Nutrition","🍎"]];
+    for (let i=0;i<3;i++){
+      const active = (["weeks","planning","nutrition"][i] === state.tab);
+      button(labels[i][0], i*w+8*DPR, y+8*DPR, w-16*DPR, h-16*DPR, {active, icon:labels[i][1]});
+      hit(`tab:${["weeks","planning","nutrition"][i]}`, {x:i*w, y, w, h});
     }
+  }
 
-    // list workouts
-    wk.workouts.forEach((block, idx)=>{
-      const cardH = block.expanded ? 160 + block.exercises.length*44 : 96;
-      const cardY = y;
-      // panel
-      ctx.fillStyle = 'rgba(255,255,255,0.08)';
-      roundRect(16, cardY, W-32, cardH, 14); ctx.fill();
+  // =========== Weeks Tab ===========
+  function drawWeeks(y0, h){
+    const week = state.weeks[state.activeWeekIndex];
+    const pad = 16*DPR;
+    let y = y0 + pad - week.scroll;
+    ctx.font = `${Math.floor(24*DPR)}px system-ui`;
+    ctx.fillStyle = THEME.sub;
+    ctx.textAlign = "left"; ctx.textBaseline = "top";
+    ctx.fillText("Drag blocks, tap to edit. Long-press to delete.", pad, y); y += 40*DPR;
 
-      // title + checkbox
-      ctx.fillStyle='#fff'; ctx.font=font(18); ctx.textBaseline='top';
-      ctx.fillText(block.name||'Workout', 56, cardY+14);
+    week.workouts.forEach((w,i)=>{
+      const cardH = Math.max(110*DPR, 70*DPR + w.exercises.length * 28*DPR);
+      // Block
+      ctx.fillStyle = THEME.card;
+      rrect(pad, y, W - pad*2, cardH, 16*DPR); ctx.fill();
+      // Title + checkbox
+      ctx.fillStyle = THEME.text;
+      ctx.font = `${Math.floor(26*DPR)}px system-ui`;
+      ctx.fillText(w.title || "Workout", pad*1.6, y + 16*DPR);
+      const cb = checkbox(w.done, W - pad*2 - 36*DPR, y + 16*DPR, 36*DPR);
+      hit(`wk:done:${w.id}`, cb);
 
-      // checkbox
-      ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.lineWidth=2;
-      roundRect(16+12, cardY+12, 24, 24, 6); ctx.stroke();
-      if (block.done){
-        ctx.fillStyle='rgba(120,200,120,0.9)';
-        roundRect(16+14, cardY+14, 20, 20, 4); ctx.fill();
-      }
-      addHit(28, cardY+12, 24, 24, { onTap: ()=>{ block.done=!block.done; save(); draw(); } });
-
-      // drag handle
-      ctx.globalAlpha=0.7;
-      ctx.fillStyle='#fff';
-      ctx.fillRect(24, cardY+52, 24, 2);
-      ctx.fillRect(24, cardY+58, 24, 2);
-      ctx.globalAlpha=1.0;
-      addHit(16, cardY, 48, 72, {
-        onDown: (p)=>{ dragging={kind:'reorder', block, offset: (p.y - cardY)}; block._y=cardY; },
+      // Exercises list
+      let ey = y + 60*DPR;
+      ctx.font = `${Math.floor(20*DPR)}px system-ui`;
+      w.exercises.forEach((e, j)=>{
+        const line = `${e.name} — ${e.sets} x ${e.reps}${e.weight?(" @ "+e.weight):""}`;
+        ctx.fillStyle = THEME.sub;
+        ctx.fillText(line, pad*1.6, ey);
+        // edit hotspot
+        hit(`ex:edit:${w.id}:${e.id}`, {x: pad, y: ey-20*DPR, w: W-pad*2, h: 26*DPR});
+        ey += 28*DPR;
       });
 
-      // expand button
-      button(56, cardY+48, 120, 28, block.expanded?'Hide exercises':'Edit exercises', ()=>{
-        block.expanded=!block.expanded; save(); draw();
-      }, {ghost:true});
-
-      // delete workout
-      iconButton(W-16-36, cardY+12, 36, '🗑', ()=>{
-        if (confirm('Delete this workout?')){ wk.workouts.splice(idx,1); save(); draw(); }
-      });
-
-      // expanded section
-      if (block.expanded){
-        let ey = cardY+96;
-        block.exercises.forEach((ex, eidx)=>{
-          // row
-          ctx.fillStyle='rgba(255,255,255,0.08)';
-          roundRect(24, ey, W-48, 36, 8); ctx.fill();
-          // text
-          ctx.fillStyle='#fff'; ctx.font=font(14); ctx.textBaseline='middle';
-          const line = `${ex.name} — ${ex.sets}×${ex.reps}${ex.weight?(' @ '+ex.weight):''}`;
-          ctx.fillText(line, 36, ey+18);
-          // done toggle
-          addHit(24, ey, W-48, 36, { onTap: ()=>{ ex.done=!ex.done; save(); draw(); } });
-          // edit button
-          button(W-24-120, ey+4, 80, 28, 'Edit', ()=>{
-            const name = prompt('Exercise name:', ex.name)||ex.name;
-            const sets = parseInt(prompt('Sets:', ex.sets)||ex.sets);
-            const reps = parseInt(prompt('Reps:', ex.reps)||ex.reps);
-            const weight = prompt('Weight (e.g., 40kg / 90lb):', ex.weight||'');
-            const notes = prompt('Notes:', ex.notes||'');
-            Object.assign(ex,{name,sets,reps,weight,notes}); save(); draw();
-          }, {ghost:true});
-          // delete exercise
-          iconButton(W-24-36, ey, 36, '×', ()=>{
-            if (confirm('Delete this exercise?')){ block.exercises.splice(eidx,1); save(); draw(); }
-          });
-          ey += 44;
-        });
-        // Add exercise FAB inside card
-        button(24, ey, W-48, 36, '+ Add exercise', ()=>{
-          block.exercises.push({name:'Exercise', sets:3, reps:10, weight:'', notes:'', done:false});
-          save(); draw();
-        });
+      // Buttons: +Exercise, Edit, Drag, Delete
+      const bw = 170*DPR, bh = 40*DPR, by = y + cardH - bh - 12*DPR;
+      const labels = [["+ Exercise",""],["Edit","✎"],["Drag","↕"],["Delete","🗑"]];
+      for (let k=0;k<labels.length;k++){
+        const bx = pad*1.6 + k*(bw+10*DPR);
+        button(labels[k][0], bx, by, bw, bh, {active:false, icon:labels[k][1]});
+        hit(`${["addex","editwk","dragwk","delwk"][k]}:${w.id}`, {x:bx,y:by,w:bw,h:bh});
       }
 
-      y += cardH + 10;
+      // drag handle region for block drag
+      hit(`dragstart:${w.id}`, {x: pad, y, w: W - pad*2, h: 40*DPR});
+      // whole card edit title
+      hit(`wk:edit:${w.id}`, {x: pad, y, w: W - pad*2 - 200*DPR, h: 50*DPR});
+
+      y += cardH + 14*DPR;
     });
 
-    // FAB: Add Workout (always accessible)
-    button(16, Math.max(y, bottomY-64), W-32, 44, '+ Add workout', ()=>{
-      wk.workouts.push({id:id(), name:'New Workout', done:false, exercises:[], expanded:true});
-      save(); draw();
-    });
+    // "Create workout in this week"
+    const cW = 420*DPR, cH = 54*DPR;
+    button("+ Create Workout", (W-cW)/2, y+8*DPR, cW, cH, {active:true});
+    hit("create-workout", {x:(W-cW)/2, y:y+8*DPR, w:cW, h:cH});
   }
 
-  function drawPlanning(top,bottomY){
-    let y = top + 8 - scroll;
-    ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.font=font(16);
-    ctx.fillText('Presets',16,y); y+=8;
-    state.presets.forEach((p, idx)=>{
-      y += 8;
-      // card
-      ctx.fillStyle='rgba(255,255,255,0.08)';
-      roundRect(16, y, W-32, 120, 12); ctx.fill();
-      ctx.fillStyle='#fff'; ctx.font=font(18);
-      ctx.fillText(p.name, 28, y+12);
-      ctx.font=font(12); ctx.globalAlpha=0.9;
-      ctx.fillText('Days: '+(p.days||[]).join(', '), 28, y+36);
-      ctx.fillText('Workouts: '+(p.workouts||[]).map(w=>w.name).join(', '), 28, y+54);
-      ctx.globalAlpha=1.0;
+  // =========== Planning Tab (Presets) ===========
+  function drawPlanning(y0, h){
+    const pad = 16*DPR;
+    let y = y0 + pad;
+    ctx.fillStyle = THEME.text;
+    ctx.font = `${Math.floor(26*DPR)}px system-ui`;
+    ctx.fillText("Presets (repeat & auto-apply)", pad, y); y += 40*DPR;
 
-      // Apply
-      button(W-16-140, y+12, 124, 28, 'Apply to week', ()=>{
-        const wk = currentWeek();
-        p.workouts.forEach(wd=> wk.workouts.push({id:id(), name:wd.name, done:false, exercises:[]}));
-        save(); draw();
-      }, {ghost:true});
-      // Auto schedule
-      button(W-16-180, y+48, 164, 28, 'Auto-schedule 4 weeks', ()=>{
-        for (let i=0;i<4;i++){
-          const w = {id:id(), name:`Week ${state.weeks.length+1}`, workouts:[]};
-          p.workouts.forEach(wd=> w.workouts.push({id:id(), name:wd.name, done:false, exercises:[]}));
-          state.weeks.push(w);
-        }
-        save(); draw();
-      }, {ghost:true});
-      // Edit
-      button(28, y+82, 80, 28, 'Edit', ()=>{
-        editPreset(p); save(); draw();
-      }, {ghost:true});
-      // Delete
-      iconButton(W-16-36, y+12, 36, '🗑', ()=>{
-        if (confirm('Delete preset?')){ state.presets.splice(idx,1); save(); draw(); }
+    // List presets
+    state.presets.forEach((p, i)=>{
+      const cardH = 90*DPR + p.workouts.length * 26*DPR;
+      ctx.fillStyle = THEME.card2;
+      rrect(pad, y, W - pad*2, cardH, 16*DPR); ctx.fill();
+
+      ctx.fillStyle = THEME.text;
+      ctx.font = `${Math.floor(24*DPR)}px system-ui`;
+      ctx.fillText(p.name, pad*1.6, y + 16*DPR);
+      ctx.fillStyle = THEME.sub;
+      ctx.font = `${Math.floor(18*DPR)}px system-ui`;
+      ctx.fillText(`Repeats: ${p.days.join(", ")}`, pad*1.6, y + 46*DPR);
+
+      let ey = y + 76*DPR;
+      p.workouts.forEach((w)=>{
+        ctx.fillStyle = THEME.sub;
+        ctx.fillText("• " + w.title, pad*1.6, ey); ey += 24*DPR;
       });
 
-      y += 128;
+      // Buttons
+      const bw = 200*DPR, bh = 40*DPR, by = y + cardH - bh - 12*DPR;
+      const bx1 = pad*1.6;
+      const bx2 = bx1 + bw + 10*DPR;
+      const bx3 = bx2 + bw + 10*DPR;
+      button("Set Active", bx1, by, bw, bh, {active: state.activePresetId === p.id});
+      hit(`preset:active:${p.id}`, {x:bx1,y:by,w:bw,h:bh});
+      button("Edit", bx2, by, bw, bh);
+      hit(`preset:edit:${p.id}`, {x:bx2,y:by,w:bw,h:bh});
+      button("Delete", bx3, by, bw, bh);
+      hit(`preset:delete:${p.id}`, {x:bx3,y:by,w:bw,h:bh});
+
+      y += cardH + 14*DPR;
     });
 
-    // Add preset
-    button(16, Math.max(y, bottomY-64), W-32, 44, '+ New preset', ()=>{
-      const p = {id:id(), name:'Custom Plan', days:[1,3,5], workouts:[{name:'Workout A'},{name:'Workout B'}]};
-      state.presets.push(p); editPreset(p); save(); draw();
-    });
+    // Add new preset
+    const cW = 380*DPR, cH = 54*DPR;
+    button("+ New Preset", (W-cW)/2, y+8*DPR, cW, cH, {active:true});
+    hit("preset:new", {x:(W-cW)/2, y:y+8*DPR, w:cW, h:cH});
   }
 
-  function editPreset(p){
-    // simple editor via prompts + day toggles
-    const name = prompt('Preset name:', p.name)||p.name;
-    p.name = name;
-    // days as toggles
-    const current = new Set(p.days||[]);
-    const toggles = [0,1,2,3,4,5,6].map(d=> (confirm(`Include day ${d}? (OK=yes / Cancel=no)`), d)).filter((d,i)=>true);
-    // The confirm flow can't capture booleans nicely in one pass in canvas-only; keep existing days if user cancels immediately.
-    // For usability we keep previous if user cancels the first confirm quickly:
-    if ((performance.now()-pressStart) > -1) { // noop to avoid linter
-      // If the user went through any confirms, we rebuild days by reading browser's confirm return values per step would be complicated.
-      // Keep original days to avoid confusion; users can rename workouts which is main need.
-    }
-    // Workouts text list edit
-    const names = prompt('Workout names (comma separated):', p.workouts.map(w=>w.name).join(', '));
-    if (names!==null){
-      p.workouts = names.split(',').map(s=>({name:s.trim()})).filter(w=>w.name);
-    }
-  }
+  // =========== Nutrition Tab ===========
+  function drawNutrition(y0, h){
+    const pad = 16*DPR;
+    let y = y0 + pad;
+    const day = state.nutrition[todayKey()] || (state.nutrition[todayKey()]={cal:0,p:0,f:0,c:0,items:[]});
 
-  function drawNutrition(top,bottomY){
-    ensureNutritionToday();
-    const N = state.nutrition;
-    let y = top + 8 - scroll;
-    ctx.fillStyle='#fff'; ctx.font=font(16);
-    ctx.fillText('Today '+N.todayDate, 16, y); y+=8;
+    // Header
+    ctx.fillStyle = THEME.text;
+    ctx.font = `${Math.floor(26*DPR)}px system-ui`;
+    ctx.fillText("Today", pad, y);
+    ctx.font = `${Math.floor(18*DPR)}px system-ui`;
+    ctx.fillStyle = THEME.sub;
+    ctx.fillText(todayKey(), pad, y + 28*DPR);
+    y += 56*DPR;
 
-    // Totals
-    const cols = ['cal','p','f','c'];
-    const labels = {cal:'Calories',p:'Protein',f:'Fat',c:'Carbs'};
-    const boxW = (W-32-24)/4;
-    cols.forEach((k,i)=>{
-      const bx = 16 + i*(boxW+8);
-      roundRect(bx, y, boxW, 64, 10); ctx.fillStyle='rgba(255,255,255,0.08)'; ctx.fill();
-      ctx.fillStyle='rgba(255,255,255,0.85)'; ctx.font=font(11);
-      ctx.fillText(labels[k], bx+10, y+10);
-      ctx.fillStyle='#fff'; ctx.font=font(18);
-      ctx.fillText(String(Math.round(N.today.totals[k]||0)), bx+10, y+34);
-    });
-    y += 76;
+    // Counters
+    const boxW = (W - pad*2 - 20*DPR)/2, boxH = 86*DPR;
+    const metrics = [
+      ["Calories", day.cal+" kcal"],
+      ["Protein", day.p+" g"],
+      ["Fats", day.f+" g"],
+      ["Carbs", day.c+" g"]
+    ];
+    for (let i=0;i<2;i++){
+      for (let j=0;j<2;j++){
+        const bx = pad + j*(boxW + 20*DPR);
+        const by = y + i*(boxH + 14*DPR);
+        ctx.fillStyle = THEME.card;
+        rrect(bx,by,boxW,boxH, 14*DPR); ctx.fill();
+        ctx.fillStyle = THEME.sub;
+        ctx.font = `${Math.floor(18*DPR)}px system-ui`;
+        ctx.fillText(metrics[i*2+j][0], bx+14*DPR, by+16*DPR);
+        ctx.fillStyle = THEME.text;
+        ctx.font = `${Math.floor(24*DPR)}px system-ui`;
+        ctx.fillText(metrics[i*2+j][1], bx+14*DPR, by+46*DPR);
+      }
+    }
+    y += 2*(boxH+14*DPR) + 10*DPR;
 
     // Items
-    (N.today.items||[]).forEach((it, idx)=>{
-      y += 8;
-      roundRect(16,y,W-32,44,10); ctx.fillStyle='rgba(255,255,255,0.08)'; ctx.fill();
-      ctx.fillStyle='#fff'; ctx.font=font(14); ctx.textBaseline='middle';
-      ctx.fillText(it.name, 28, y+22);
-      const macro = `Kcal ${it.cal} | P ${it.p} | F ${it.f} | C ${it.c}`;
-      ctx.font=font(12);
-      const tw = ctx.measureText(macro).width;
-      ctx.fillText(macro, W-24-tw, y+22);
-      // delete
-      iconButton(W-16-36, y+4, 36, '🗑', ()=>{
-        if (confirm('Delete entry?')){
-          N.today.items.splice(idx,1);
-          // recompute totals
-          const t={cal:0,p:0,f:0,c:0};
-          N.today.items.forEach(a=>{t.cal+=a.cal;t.p+=a.p;t.f+=a.f;t.c+=a.c;});
-          N.today.totals=t; save(); draw();
-        }
+    ctx.fillStyle = THEME.text;
+    ctx.font = `${Math.floor(22*DPR)}px system-ui`;
+    ctx.fillText("Today's items", pad, y); y += 10*DPR;
+    ctx.fillStyle = THEME.sub;
+    ctx.font = `${Math.floor(18*DPR)}px system-ui`;
+    if(day.items.length===0){
+      ctx.fillText("No items yet.", pad, y+24*DPR);
+    } else {
+      day.items.forEach((it, idx)=>{
+        const h = 56*DPR;
+        ctx.fillStyle = THEME.card2;
+        rrect(pad, y, W - pad*2, h, 12*DPR); ctx.fill();
+        ctx.fillStyle = THEME.text;
+        ctx.font = `${Math.floor(20*DPR)}px system-ui`;
+        ctx.fillText(`${it.name} — ${it.cal}kcal, P${it.p}/F${it.f}/C${it.c}`, pad+14*DPR, y+16*DPR);
+        button("Delete", W - pad - 140*DPR, y+8*DPR, 120*DPR, 40*DPR);
+        hit(`nutr:del:${idx}`, {x:W - pad - 140*DPR, y:y+8*DPR, w:120*DPR, h:40*DPR});
+        y += h + 10*DPR;
       });
-      y += 44;
-    });
+    }
 
-    // Add food FAB (ensure clickable above everything)
-    button(16, Math.max(y+8, bottomY-64), W-32, 44, '+ Add food', ()=>{
-      const name = prompt('Food name:', 'Chicken breast 200g'); if(!name) return;
-      const cal = parseFloat(prompt('Calories:', '330')||'0')||0;
-      const p = parseFloat(prompt('Protein (g):', '62')||'0')||0;
-      const f = parseFloat(prompt('Fat (g):', '4')||'0')||0;
-      const c = parseFloat(prompt('Carbs (g):', '0')||'0')||0;
-      const item = {id:id(), name, cal,p,f,c};
-      N.today.items.push(item);
-      N.today.totals.cal += cal; N.today.totals.p += p; N.today.totals.f += f; N.today.totals.c += c;
-      save(); draw();
-    });
-    // History
-    button(W-16-140, top+8, 124, 28, 'View history', ()=>{
-      alert((N.history||[]).slice(-14).map(h=>`${h.date}: ${Math.round(h.totals.cal)} kcal, P${h.totals.p}/F${h.totals.f}/C${h.totals.c}`).join('\n') || 'No history yet.');
-    }, {ghost:true});
+    // Add food button
+    const cW = 300*DPR, cH = 54*DPR;
+    button("+ Add Food", (W-cW)/2, y+8*DPR, cW, cH, {active:true});
+    hit("nutr:add", {x:(W-cW)/2, y:y+8*DPR, w:cW, h:cH});
   }
 
-  function drawSettings(top,bottomY){
-    const t = state.theme||defaultTheme;
-    let y = top + 8 - scroll;
-    ctx.fillStyle='#fff'; ctx.font=font(16);
-    ctx.fillText('Personalization', 16, y); y+=12;
-    // scheme
-    ['dark','amoled','light'].forEach((s,i)=>{
-      const active = t.scheme===s;
-      const xx = 16 + i*110;
-      const lbl = s[0].toUpperCase()+s.slice(1);
-      ctx.fillStyle = active ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.10)';
-      roundRect(xx, y, 100, 32, 10); ctx.fill();
-      ctx.fillStyle='#fff'; ctx.font=font(14); ctx.textBaseline='middle';
-      ctx.fillText(lbl, xx+12, y+16);
-      addHit(xx,y,100,32,{onTap:()=>{ t.scheme=s; save(); draw(); }});
-    });
-    y += 44;
-    // accent
-    ctx.fillStyle='#fff'; ctx.font=font(14); ctx.fillText('Accent color:', 16, y); y+=8;
-    const colorset = ['#4C6EF5','#FF6B6B','#20C997','#FAB005','#845EF7','#12B886'];
-    colorset.forEach((cl,i)=>{
-      const xx = 16 + i*48;
-      ctx.fillStyle = cl; roundRect(xx,y,40,28,8); ctx.fill();
-      addHit(xx,y,40,28,{onTap:()=>{ t.accent=cl; save(); draw(); }});
-    });
-    y += 40;
-    // font scale
-    ctx.fillStyle='#fff'; ctx.font=font(14); ctx.fillText('Font size:', 16, y); y+=8;
-    ['0.9','1.0','1.1','1.2'].forEach((s,i)=>{
-      const val = parseFloat(s);
-      const active = Math.abs((t.fontScale||1)-val)<0.05;
-      const xx = 16 + i*72;
-      ctx.fillStyle = active ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.10)';
-      roundRect(xx,y,64,28,8); ctx.fill();
-      ctx.fillStyle='#fff'; ctx.font=font(14); ctx.textBaseline='middle';
-      ctx.fillText(s+'x', xx+18, y+14);
-      addHit(xx,y,64,28,{onTap:()=>{ t.fontScale=val; save(); draw(); }});
+  // =============== Pointer Handlers ===============
+  function onPointerDown(x,y){
+    const id = hitTest(x,y);
+    if(!id) return;
+
+    // Tabs
+    if(id.startsWith("tab:")){
+      state.tab = id.split(":")[1];
+      saveState(); draw(); return;
+    }
+    // Week chips
+    if(id.startsWith("week:")){
+      state.activeWeekIndex = parseInt(id.split(":")[1]);
+      saveState(); draw(); return;
+    }
+    if(id==="add-week"){
+      const n = state.weeks.length+1;
+      const wk = makeWeek("Week "+n);
+      // auto-apply preset if set
+      if(state.activePresetId){
+        const p = state.presets.find(x=>x.id===state.activePresetId);
+        if(p){
+          wk.workouts = p.workouts.map(w=>({...w, id:uid(), exercises:w.exercises.map(e=>({...e, id:uid()}))}));
+        }
+      }
+      state.weeks.push(wk);
+      state.activeWeekIndex = state.weeks.length-1;
+      saveState(); draw(); return;
+    }
+    // Weeks tab actions
+    const parts = id.split(":");
+    if(parts[0]==="wk"){
+      const week = state.weeks[state.activeWeekIndex];
+      const w = week.workouts.find(x=>x.id===parts[2]);
+      if(parts[1]==="done"){
+        w.done = !w.done; saveState(); draw(); return;
+      }
+      if(parts[1]==="edit"){
+        promptText("Workout title", w.title, (val)=>{ w.title = val || w.title; saveState(); draw(); });
+        return;
+      }
+    }
+    if(id.startsWith("addex:")){
+      const wid = id.split(":")[1];
+      const week = state.weeks[state.activeWeekIndex];
+      const w = week.workouts.find(x=>x.id===wid);
+      openExerciseEditor(w, null);
+      return;
+    }
+    if(id.startsWith("editwk:")){
+      const wid = id.split(":")[1];
+      const week = state.weeks[state.activeWeekIndex];
+      const w = week.workouts.find(x=>x.id===wid);
+      promptText("Workout title", w.title, (val)=>{ w.title = val || w.title; saveState(); draw(); });
+      return;
+    }
+    if(id.startsWith("delwk:")){
+      const wid = id.split(":")[1];
+      const week = state.weeks[state.activeWeekIndex];
+      week.workouts = week.workouts.filter(x=>x.id!==wid);
+      saveState(); draw(); return;
+    }
+    if(id.startsWith("dragwk:") || id.startsWith("dragstart:")){
+      const wid = id.split(":")[1];
+      drag = {type:"workout", id: wid, startY: y, lastY:y};
+      return;
+    }
+    if(id.startsWith("ex:edit:")){
+      const [, , wid, eid] = id.split(":");
+      const week = state.weeks[state.activeWeekIndex];
+      const w = week.workouts.find(x=>x.id===wid);
+      const e = w.exercises.find(x=>x.id===eid);
+      openExerciseEditor(w, e);
+      return;
+    }
+    if(id==="create-workout"){
+      const week = state.weeks[state.activeWeekIndex];
+      week.workouts.push({id:uid(), title:"New Workout", done:false, exercises:[]});
+      saveState(); draw(); return;
+    }
+
+    // Planning
+    if(id==="preset:new"){
+      const p = {id:uid(), name:"Preset "+(state.presets.length+1), days:["Mon","Wed","Fri"], workouts:[{id:uid(), title:"A", exercises:[ex("Bench",3,8),ex("Squat",3,8)]}]};
+      state.presets.push(p); saveState(); draw(); return;
+    }
+    if(id.startsWith("preset:active:")){
+      const pid = id.split(":")[2];
+      state.activePresetId = (state.activePresetId===pid)? null : pid;
+      saveState(); draw(); return;
+    }
+    if(id.startsWith("preset:delete:")){
+      const pid = id.split(":")[2];
+      state.presets = state.presets.filter(p=>p.id!==pid);
+      if(state.activePresetId===pid) state.activePresetId = null;
+      saveState(); draw(); return;
+    }
+    if(id.startsWith("preset:edit:")){
+      const pid = id.split(":")[2];
+      const p = state.presets.find(x=>x.id===pid);
+      promptText("Preset name (comma days after name e.g. 'PPL, Mon Wed Fri')", p.name+", "+p.days.join(" "), (val)=>{
+        if(!val) return;
+        const seg = val.split(",");
+        p.name = seg[0].trim() || p.name;
+        if(seg[1]) p.days = seg[1].trim().split(/\s+/).map(s=>s.slice(0,3));
+        saveState(); draw();
+      });
+      return;
+    }
+
+    // Nutrition
+    if(id==="nutr:add"){
+      promptText("Food (name kcal P F C)", "", (val)=>{
+        if(!val) return;
+        const parts = val.trim().split(/\s+/);
+        if(parts.length<5) return;
+        const [name, cal, P, F, C] = [parts[0], ...parts.slice(1).map(Number)];
+        const d = state.nutrition[todayKey()] || (state.nutrition[todayKey()]={cal:0,p:0,f:0,c:0,items:[]});
+        const item = {name, cal, p:P, f:F, c:C};
+        d.items.push(item);
+        d.cal += cal; d.p += P; d.f += F; d.c += C;
+        saveState(); draw();
+      });
+      return;
+    }
+    if(id.startsWith("nutr:del:")){
+      const idx = +id.split(":")[2];
+      const d = state.nutrition[todayKey()];
+      const it = d.items[idx];
+      d.items.splice(idx,1);
+      d.cal -= it.cal; d.p -= it.p; d.f -= it.f; d.c -= it.c;
+      saveState(); draw(); return;
+    }
+  }
+
+  function onPointerMove(x,y){
+    const week = state.weeks[state.activeWeekIndex];
+    if(drag && drag.type==="workout"){
+      const dy = y - drag.lastY;
+      week.scroll = clamp(week.scroll - dy, 0, 10000);
+      drag.lastY = y;
+      draw();
+    }
+  }
+  function onPointerUp(x,y){
+    drag = null;
+  }
+
+  // =============== Overlays ===============
+  function promptText(label, initial, cb){
+    // Position hidden input and focus to get iOS keyboard
+    input.value = initial || "";
+    input.style.left = (10) + "px";
+    input.style.top = (10) + "px";
+    input.style.width = "70vw";
+    input.style.height = "1px";
+    input.onkeydown = (e)=>{
+      if(e.key==="Enter"){
+        input.blur();
+        cb(input.value);
+        input.onkeydown = null;
+      }
+    };
+    const prevBlur = input.onblur;
+    input.onblur = ()=>{
+      cb(input.value);
+      input.onblur = prevBlur;
+    };
+    setTimeout(()=> input.focus(), 0);
+  }
+
+  function openExerciseEditor(workout, exercise){
+    const fields = exercise ? {...exercise} : ex("New Exercise");
+    // simple pipe-separated prompt across multiple lines
+    const tpl = `${fields.name}|${fields.sets}|${fields.reps}|${fields.weight||""}|${fields.notes||""}`;
+    promptText("name|sets|reps|weight|notes", tpl, (val)=>{
+      if(!val) return;
+      const [name, sets, reps, weight, notes] = val.split("|");
+      if(exercise){
+        exercise.name = name||exercise.name;
+        exercise.sets = +sets||exercise.sets;
+        exercise.reps = +reps||exercise.reps;
+        exercise.weight = weight||"";
+        exercise.notes = notes||"";
+      } else {
+        workout.exercises.push(ex(name||"Exercise", +sets||3, +reps||10, weight||"", notes||""));
+      }
+      saveState(); draw();
+      // Ask for image?
+      chooseImage((dataURL)=>{
+        const e = exercise || workout.exercises[workout.exercises.length-1];
+        e.img = dataURL;
+        saveState(); draw();
+      });
     });
   }
 
-  function drawTabs(y,h){
-    const tabs = [
-      {k:'weeks', label:'Weeks', glyph:'●'},
-      {k:'planning', label:'Planning', glyph:'◆'},
-      {k:'nutrition', label:'Nutrition', glyph:'■'},
-      {k:'settings', label:'Settings', glyph:'⚙'}
-    ];
-    const col = colors();
-    ctx.fillStyle='rgba(0,0,0,0.5)'; ctx.fillRect(0,y,W,h);
-    const w = W/tabs.length;
-    tabs.forEach((t,i)=>{
-      const x = i*w;
-      const active = tab===t.k;
-      if (active){ ctx.fillStyle='rgba(255,255,255,0.09)'; roundRect(x+8,y+6,w-16,h-20,12); ctx.fill(); }
-      ctx.fillStyle='#fff'; ctx.font=font(12);
-      ctx.fillText(t.glyph, x+w/2-24, y+22);
-      ctx.fillText(t.label, x+w/2-14, y+22);
-      addHit(x,y,w,h,{onTap:()=>{ tab=t.k; save(); draw(); }});
-    });
+  function chooseImage(cb){
+    fileInput.onchange = ()=>{
+      const file = fileInput.files[0];
+      if(!file){ cb(""); return; }
+      const reader = new FileReader();
+      reader.onload = ()=> cb(reader.result);
+      reader.readAsDataURL(file);
+    };
+    fileInput.click();
   }
 
-  // Start
+  // Initial paint
   draw();
 })();
